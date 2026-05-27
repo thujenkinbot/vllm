@@ -1984,11 +1984,13 @@ def get_kv_cache_configs(
         for layer_name, layer_spec in kv_cache_spec_one_worker.items():
             if layer_name not in merged_kv_cache_specs:
                 merged_kv_cache_specs[layer_name] = layer_spec
-            else:
+            elif not vllm_config.parallel_config.enable_edge_cloud:
                 assert merged_kv_cache_specs[layer_name] == layer_spec, (
                     "The KV cache specs for the same layer are different "
                     "across workers. This is not supported yet."
                 )
+            # When edge-cloud is enabled, allow later workers (Cloud) to
+            # override the earlier virtual spec from Edge.
 
     # Get global KV cache groups. This also handles spec unification for
     # hybrid models when disable_hybrid_kv_cache_manager is enabled.
@@ -1998,8 +2000,15 @@ def get_kv_cache_configs(
     # If original_max_model_len was -1, automatically
     # determine the maximum model length that fits in available GPU memory.
     # We use per-worker projected groups to account for PP sharding.
+    # When edge-cloud is enabled, a worker (especially the embedding-only
+    # edge side) may report an empty spec because static_forward_context
+    # was cleaned after sharding. Fall back to the merged full-model spec
+    # so that projected groups remain non-empty and the scheduler can work.
     projected_groups_per_worker = [
-        _project_kv_cache_groups_to_worker(global_kv_cache_groups, worker_spec)
+        _project_kv_cache_groups_to_worker(
+            global_kv_cache_groups,
+            worker_spec if worker_spec else merged_kv_cache_specs,
+        )
         for worker_spec in kv_cache_specs
     ]
 
@@ -2045,9 +2054,14 @@ def get_kv_cache_configs(
     for projected_groups, kv_cache_spec_one_worker, available_memory_one_worker in zip(
         projected_groups_per_worker, kv_cache_specs, available_memory
     ):
-        assert sum(len(group.layer_names) for group in projected_groups) == len(
-            kv_cache_spec_one_worker
-        ), "Some layers are not assigned to any group."
+        # In edge-cloud embedding_only mode, the edge worker has no local
+        # attention layers and reports an empty spec. Its projected_groups
+        # is built from the merged full-model spec, so the assertion would
+        # fail. Skip the assertion when the worker spec is empty.
+        if kv_cache_spec_one_worker:
+            assert sum(len(group.layer_names) for group in projected_groups) == len(
+                kv_cache_spec_one_worker
+            ), "Some layers are not assigned to any group."
         kv_cache_configs.append(
             get_kv_cache_config_from_groups(
                 vllm_config, projected_groups, available_memory_one_worker
