@@ -177,7 +177,13 @@ def run_headless(args: argparse.Namespace):
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGINT, signal_handler)
 
-    if parallel_config.node_rank_within_dp > 0:
+    if (
+        parallel_config.node_rank_within_dp > 0
+        or (
+            parallel_config.enable_edge_cloud
+            and not parallel_config.is_edge_node
+        )
+    ):
         from vllm.version import __version__ as VLLM_VERSION
 
         # Run headless workers (for multi-node PP/TP).

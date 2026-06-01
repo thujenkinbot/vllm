@@ -132,7 +132,7 @@ class MultiprocExecutor(Executor):
         scheduler_output_handle: Handle | None = None
         # Initialize worker and set up message queues for SchedulerOutputs
         # and ModelRunnerOutputs
-        if self.parallel_config.node_rank_within_dp == 0:
+        if self._is_executor_leader_node():
             # For leader node within each dp rank,
             # each dp will have its own leader multiproc executor.
             max_chunk_bytes = envs.VLLM_MQ_MAX_CHUNK_BYTES_MB * 1024 * 1024
@@ -213,10 +213,7 @@ class MultiprocExecutor(Executor):
 
             self.response_mqs = []
             # Only leader node have remote response mqs
-            if self.parallel_config.node_rank_within_dp == 0 and (
-                not self.parallel_config.enable_edge_cloud
-                or self.parallel_config.is_edge_node
-            ):
+            if self._is_executor_leader_node():
                 for rank in range(self.world_size):
                     local_idx = rank - global_start_rank
                     if 0 <= local_idx < self.local_world_size:
@@ -275,6 +272,11 @@ class MultiprocExecutor(Executor):
 
     def _post_init_executor(self) -> None:
         pass
+
+    def _is_executor_leader_node(self) -> bool:
+        if self.parallel_config.enable_edge_cloud:
+            return self.parallel_config.is_edge_node
+        return self.parallel_config.node_rank_within_dp == 0
 
     def _is_driver_worker(self, rank: int) -> bool:
         if self.parallel_config.enable_edge_cloud:
