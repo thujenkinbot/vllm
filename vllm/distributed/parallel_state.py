@@ -822,12 +822,19 @@ class GroupCoordinator:
         """[edge-cloud PP opt] fold `residual` into `hidden_states` so only
         one tensor crosses the PP boundary (halves activation comm). This
         performs the add that fused add+norm would otherwise defer to the
-        receiver's first layer. No-op unless both keys are present."""
+        receiver's first layer.
+
+        Do not mutate the input dict. ACLGraph replay returns a cached
+        IntermediateTensors object; changing its tensor dict here would corrupt
+        the cached graph output across decode steps.
+        """
         if "residual" in tensor_dict and "hidden_states" in tensor_dict:
             r, h = tensor_dict["residual"], tensor_dict["hidden_states"]
             if isinstance(r, torch.Tensor) and isinstance(h, torch.Tensor):
-                tensor_dict["hidden_states"] = r + h
-                del tensor_dict["residual"]
+                merged = dict(tensor_dict)
+                merged["hidden_states"] = r + h
+                del merged["residual"]
+                return merged
         return tensor_dict
 
     def send_tensor_dict(
