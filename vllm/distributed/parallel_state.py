@@ -902,7 +902,8 @@ class GroupCoordinator:
             logger.info_once(
                 "[pp-residual-merge] sender rank_in_group=%s sp_skip=%s "
                 "merged=%s keys_after=%s hidden_shape=%s",
-                self.rank_in_group, skip_sp, merged, sorted(tensor_dict.keys()),
+                self.rank_in_group, skip_sp, merged,
+                tuple(sorted(tensor_dict.keys())),
                 tuple(h.shape) if isinstance(h, torch.Tensor) else None,
             )
         else:
@@ -1046,7 +1047,7 @@ class GroupCoordinator:
                     "[pp-residual-merge] receiver(custom) rank_in_group=%s "
                     "residual_before=%s residual_after=%s keys=%s",
                     self.rank_in_group, before, "residual" in sync_tensor_dict,
-                    sorted(sync_tensor_dict.keys()),
+                    tuple(sorted(sync_tensor_dict.keys())),
                 )
             return sync_tensor_dict, [], []
 
@@ -1139,7 +1140,7 @@ class GroupCoordinator:
                     "[pp-residual-merge] receiver(nccl) rank_in_group=%s "
                     "residual_before=%s residual_after=%s keys=%s",
                     self.rank_in_group, before, "residual" in tensor_dict,
-                    sorted(tensor_dict.keys()),
+                    tuple(sorted(tensor_dict.keys())),
                 )
 
             postprocess.append(_restore_residual)
