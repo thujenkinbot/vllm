@@ -830,18 +830,6 @@ class GroupCoordinator:
                 del tensor_dict["residual"]
         return tensor_dict
 
-    @staticmethod
-    def _restore_residual_after_recv(
-        tensor_dict: dict[str, torch.Tensor | Any],
-    ) -> dict[str, torch.Tensor | Any]:
-        """[edge-cloud PP opt] inject a zero `residual` so model code is
-        unchanged: input_layernorm(M, 0) == norm(M), numerically identical.
-        No-op if `hidden_states` is absent or `residual` already present."""
-        h = tensor_dict.get("hidden_states")
-        if isinstance(h, torch.Tensor) and "residual" not in tensor_dict:
-            tensor_dict["residual"] = torch.zeros_like(h)
-        return tensor_dict
-
     def send_tensor_dict(
         self,
         tensor_dict: dict[str, torch.Tensor | Any],
@@ -986,7 +974,6 @@ class GroupCoordinator:
         src: int | None = None,
         all_gather_group: "GroupCoordinator | None" = None,
         all_gather_tensors: dict[str, bool] | None = None,
-        restore_residual: bool = True,
     ) -> tuple[
         dict[str, torch.Tensor | Any] | None,
         list[Handle],
@@ -1006,8 +993,6 @@ class GroupCoordinator:
             sync_tensor_dict = self.device_communicator.recv_tensor_dict(  # type: ignore
                 src
             )
-            if restore_residual:
-                sync_tensor_dict = self._restore_residual_after_recv(sync_tensor_dict)
             return sync_tensor_dict, [], []
 
         all_gather_size = 1 if all_gather_group is None else all_gather_group.world_size
@@ -1067,18 +1052,6 @@ class GroupCoordinator:
                     tensor_dict[key] = full_tensor
             else:
                 tensor_dict[key] = value
-
-        # [edge-cloud PP opt] restore a zero residual after all-gather so
-        # model code is unchanged: input_layernorm(M, 0) == norm(M).
-        # Callers that run their own TP-broadcast after this (e.g. edge-cloud)
-        # pass restore_residual=False and restore themselves after that
-        # broadcast — restoring before it would change the broadcasted tensor
-        # count and desync non-rank-0 peers.
-        if restore_residual:
-            def _restore_residual() -> None:
-                self._restore_residual_after_recv(tensor_dict)
-
-            postprocess.append(_restore_residual)
 
         return tensor_dict, handles, postprocess
 
