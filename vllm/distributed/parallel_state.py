@@ -870,7 +870,6 @@ class GroupCoordinator:
         # Bypass the function if we are using only 1 GPU.
         if not torch.distributed.is_initialized() or self.world_size == 1:
             return tensor_dict
-        tensor_dict = self._merge_residual_for_transport(tensor_dict)
         handles = self.isend_tensor_dict(
             tensor_dict,
             dst=dst,
@@ -890,6 +889,12 @@ class GroupCoordinator:
     ) -> list[Handle]:
         if self.world_size <= 1:
             return []
+
+        # [edge-cloud PP opt] fold residual into hidden_states so only one
+        # tensor crosses the boundary (halves activation comm). Skipped under
+        # sequence parallelism, where residual has a dedicated all-gather.
+        if "residual" not in (all_gather_tensors or {}):
+            tensor_dict = self._merge_residual_for_transport(tensor_dict)
 
         if dst is None:
             dst = (self.rank_in_group + 1) % self.world_size
@@ -974,7 +979,6 @@ class GroupCoordinator:
             handle.wait()
         for fn in postprocess:
             fn()
-        tensor_dict = self._restore_residual_after_recv(tensor_dict)
         return tensor_dict
 
     def irecv_tensor_dict(
@@ -1001,6 +1005,7 @@ class GroupCoordinator:
             sync_tensor_dict = self.device_communicator.recv_tensor_dict(  # type: ignore
                 src
             )
+            sync_tensor_dict = self._restore_residual_after_recv(sync_tensor_dict)
             return sync_tensor_dict, [], []
 
         all_gather_size = 1 if all_gather_group is None else all_gather_group.world_size
@@ -1061,6 +1066,12 @@ class GroupCoordinator:
             else:
                 tensor_dict[key] = value
 
+        # [edge-cloud PP opt] restore a zero residual after all-gather so
+        # model code is unchanged: input_layernorm(M, 0) == norm(M).
+        def _restore_residual() -> None:
+            self._restore_residual_after_recv(tensor_dict)
+
+        postprocess.append(_restore_residual)
         return tensor_dict, handles, postprocess
 
     def barrier(self):
