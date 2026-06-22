@@ -87,26 +87,12 @@ class AsyncIntermediateTensors(IntermediateTensors):
     def wait_for_comm(self) -> None:
         if self._comm_waited:
             return
-        try:
-            rank = get_pp_group().rank_in_group
-        except Exception:
-            rank = "?"
-        logger.info(
-            "[pp-trace] rank=%s wait ENTER handles=%d postprocess=%d",
-            rank, len(self._comm_handles or []), len(self._comm_postprocess or []),
-        )
         if self._comm_handles:
             for handle in self._comm_handles:
                 handle.wait()
-        logger.info("[pp-trace] rank=%s wait handles_done", rank)
         if self._comm_postprocess:
-            for i, fn in enumerate(self._comm_postprocess):
-                logger.info(
-                    "[pp-trace] rank=%s wait postprocess %d/%d",
-                    rank, i + 1, len(self._comm_postprocess),
-                )
+            for fn in self._comm_postprocess:
                 fn()
-        logger.info("[pp-trace] rank=%s wait DONE", rank)
         self._comm_waited = True
 
     def __getattribute__(self, name: str):

@@ -893,25 +893,8 @@ class GroupCoordinator:
         # [edge-cloud PP opt] fold residual into hidden_states so only one
         # tensor crosses the boundary (halves activation comm). Skipped under
         # sequence parallelism, where residual has a dedicated all-gather.
-        skip_sp = "residual" in (all_gather_tensors or {})
-        if not skip_sp:
-            keys_before = set(tensor_dict.keys())
+        if "residual" not in (all_gather_tensors or {}):
             tensor_dict = self._merge_residual_for_transport(tensor_dict)
-            merged = "residual" in keys_before and "residual" not in tensor_dict
-            h = tensor_dict.get("hidden_states")
-            logger.info_once(
-                "[pp-residual-merge] sender rank_in_group=%s sp_skip=%s "
-                "merged=%s keys_after=%s hidden_shape=%s",
-                self.rank_in_group, skip_sp, merged,
-                tuple(sorted(tensor_dict.keys())),
-                tuple(h.shape) if isinstance(h, torch.Tensor) else None,
-            )
-        else:
-            logger.info_once(
-                "[pp-residual-merge] sender rank_in_group=%s sp_skip=True "
-                "(sequence parallelism active; not merging)",
-                self.rank_in_group,
-            )
 
         if dst is None:
             dst = (self.rank_in_group + 1) % self.world_size
@@ -935,15 +918,7 @@ class GroupCoordinator:
         metadata_group = self.cpu_group
 
         metadata_list, tensor_list = _split_tensor_dict(tensor_dict)
-        logger.info(
-            "[pp-trace] rank=%s isend ENTER dst=%s keys=%s",
-            self.rank_in_group, dst, sorted(tensor_dict.keys()),
-        )
         self.send_object(metadata_list, dst=dst)
-        logger.info(
-            "[pp-trace] rank=%s isend metadata sent (%d tensors)",
-            self.rank_in_group, len(tensor_list),
-        )
 
         tensor_keys = [k for k, v in tensor_dict.items() if isinstance(v, torch.Tensor)]
         assert len(tensor_keys) == len(tensor_list)
@@ -953,16 +928,11 @@ class GroupCoordinator:
             if tensor.numel() == 0:
                 continue
 
-            use_ag = self._should_use_all_gather(
+            if self._should_use_all_gather(
                 key, tensor.numel(), all_gather_group, all_gather_tensors
-            )
-            if use_ag:
+            ):
                 tensor = tensor.reshape(all_gather_size, -1)[all_gather_rank]
 
-            logger.info(
-                "[pp-trace] rank=%s isend> key=%s shape=%s numel=%s all_gather=%s",
-                self.rank_in_group, key, tuple(tensor.shape), tensor.numel(), use_ag,
-            )
             comm_group = metadata_group if tensor.is_cpu else group
             handle = torch.distributed.isend(
                 tensor, dst=self.ranks[dst], group=comm_group
@@ -971,10 +941,6 @@ class GroupCoordinator:
                 tensor.record_stream(torch.cuda.current_stream(tensor.device))
             handles.append(handle)
 
-        logger.info(
-            "[pp-trace] rank=%s isend DONE (%d handles)",
-            self.rank_in_group, len(handles),
-        )
         return handles
 
     def recv_tensor_dict(
@@ -1041,14 +1007,7 @@ class GroupCoordinator:
                 src
             )
             if restore_residual:
-                before = "residual" in sync_tensor_dict
                 sync_tensor_dict = self._restore_residual_after_recv(sync_tensor_dict)
-                logger.info_once(
-                    "[pp-residual-merge] receiver(custom) rank_in_group=%s "
-                    "residual_before=%s residual_after=%s keys=%s",
-                    self.rank_in_group, before, "residual" in sync_tensor_dict,
-                    tuple(sorted(sync_tensor_dict.keys())),
-                )
             return sync_tensor_dict, [], []
 
         all_gather_size = 1 if all_gather_group is None else all_gather_group.world_size
@@ -1059,16 +1018,7 @@ class GroupCoordinator:
         group = self.device_group
         metadata_group = self.cpu_group
 
-        logger.info(
-            "[pp-trace] rank=%s irecv ENTER src=%s",
-            self.rank_in_group, src,
-        )
         recv_metadata_list = self.recv_object(src=src)
-        logger.info(
-            "[pp-trace] rank=%s irecv metadata recv keys=%s",
-            self.rank_in_group,
-            [k for k, _ in recv_metadata_list],
-        )
         tensor_dict: dict[str, Any] = {}
         handles: list[Handle] = []
         postprocess: list[Callable[[], None]] = []
@@ -1089,10 +1039,6 @@ class GroupCoordinator:
                     slice_tensor = full_tensor.reshape(all_gather_size, -1)[
                         all_gather_rank
                     ]
-                    logger.info(
-                        "[pp-trace] rank=%s irecv> key=%s size=%s all_gather=True",
-                        self.rank_in_group, key, tuple(full_tensor.shape),
-                    )
                     comm_group = metadata_group if slice_tensor.is_cpu else group
                     handle = torch.distributed.irecv(
                         slice_tensor, src=self.ranks[src], group=comm_group
@@ -1113,10 +1059,6 @@ class GroupCoordinator:
                     postprocess.append(_postprocess)
                     tensor_dict[key] = slice_tensor
                 else:
-                    logger.info(
-                        "[pp-trace] rank=%s irecv> key=%s size=%s all_gather=False",
-                        self.rank_in_group, key, tuple(full_tensor.shape),
-                    )
                     comm_group = metadata_group if full_tensor.is_cpu else group
                     handle = torch.distributed.irecv(
                         full_tensor, src=self.ranks[src], group=comm_group
@@ -1134,20 +1076,10 @@ class GroupCoordinator:
         # count and desync non-rank-0 peers.
         if restore_residual:
             def _restore_residual() -> None:
-                before = "residual" in tensor_dict
                 self._restore_residual_after_recv(tensor_dict)
-                logger.info_once(
-                    "[pp-residual-merge] receiver(nccl) rank_in_group=%s "
-                    "residual_before=%s residual_after=%s keys=%s",
-                    self.rank_in_group, before, "residual" in tensor_dict,
-                    tuple(sorted(tensor_dict.keys())),
-                )
 
             postprocess.append(_restore_residual)
-        logger.info(
-            "[pp-trace] rank=%s irecv DONE (%d handles, %d postprocess)",
-            self.rank_in_group, len(handles), len(postprocess),
-        )
+
         return tensor_dict, handles, postprocess
 
     def barrier(self):
