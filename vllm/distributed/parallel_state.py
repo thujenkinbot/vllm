@@ -815,6 +815,33 @@ class GroupCoordinator:
             use_all_gather = all_gather_tensors.get(key, use_all_gather)
         return use_all_gather
 
+    @staticmethod
+    def _merge_residual_for_transport(
+        tensor_dict: dict[str, torch.Tensor | Any],
+    ) -> dict[str, torch.Tensor | Any]:
+        """[edge-cloud PP opt] fold `residual` into `hidden_states` so only
+        one tensor crosses the PP boundary (halves activation comm). This
+        performs the add that fused add+norm would otherwise defer to the
+        receiver's first layer. No-op unless both keys are present."""
+        if "residual" in tensor_dict and "hidden_states" in tensor_dict:
+            r, h = tensor_dict["residual"], tensor_dict["hidden_states"]
+            if isinstance(r, torch.Tensor) and isinstance(h, torch.Tensor):
+                tensor_dict["hidden_states"] = r + h
+                del tensor_dict["residual"]
+        return tensor_dict
+
+    @staticmethod
+    def _restore_residual_after_recv(
+        tensor_dict: dict[str, torch.Tensor | Any],
+    ) -> dict[str, torch.Tensor | Any]:
+        """[edge-cloud PP opt] inject a zero `residual` so model code is
+        unchanged: input_layernorm(M, 0) == norm(M), numerically identical.
+        No-op if `hidden_states` is absent or `residual` already present."""
+        h = tensor_dict.get("hidden_states")
+        if isinstance(h, torch.Tensor) and "residual" not in tensor_dict:
+            tensor_dict["residual"] = torch.zeros_like(h)
+        return tensor_dict
+
     def send_tensor_dict(
         self,
         tensor_dict: dict[str, torch.Tensor | Any],
@@ -843,6 +870,7 @@ class GroupCoordinator:
         # Bypass the function if we are using only 1 GPU.
         if not torch.distributed.is_initialized() or self.world_size == 1:
             return tensor_dict
+        tensor_dict = self._merge_residual_for_transport(tensor_dict)
         handles = self.isend_tensor_dict(
             tensor_dict,
             dst=dst,
@@ -946,6 +974,7 @@ class GroupCoordinator:
             handle.wait()
         for fn in postprocess:
             fn()
+        tensor_dict = self._restore_residual_after_recv(tensor_dict)
         return tensor_dict
 
     def irecv_tensor_dict(
