@@ -96,6 +96,10 @@ class Request:
 
         self.status = RequestStatus.WAITING
         self.events: list[EngineCoreEvent] = []
+        # Per-request timing trace, set by EngineCore on the engine process.
+        # None by default and when VLLM_TRACE_REQUEST is unset. Engine-process
+        # timestamps are NOT comparable with the API frontend process.
+        self.trace: Any = None
         self.stop_reason: int | str | None = None
 
         # P/D: Connector-specific KV transfer parameters.

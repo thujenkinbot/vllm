@@ -37,6 +37,7 @@ from vllm.multimodal.parse import (
 from vllm.multimodal.processing import BaseMultiModalProcessor
 from vllm.multimodal.processing import ProcessorInputs as MMProcessorInputs
 from vllm.multimodal.registry import MultiModalTimingRegistry
+from vllm.request_trace import current_request_trace, mark_trace
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.async_utils import (
     AsyncMicrobatchTokenizer,
@@ -966,7 +967,9 @@ class BaseRenderer(ABC, Generic[_T]):
             tok_params = self.default_cmpl_tok_params
 
         dict_prompts = await self.render_prompts_async(prompts)
+        mark_trace(current_request_trace(), "tokenize_start")
         tok_prompts = await self.tokenize_prompts_async(dict_prompts, tok_params)
+        mark_trace(current_request_trace(), "tokenize_done")
 
         self._apply_prompt_extras(tok_prompts, prompt_extras)
 
@@ -1040,7 +1043,9 @@ class BaseRenderer(ABC, Generic[_T]):
             out_conversations.append(conv)
             dict_prompts.append(prompt)
 
+        mark_trace(current_request_trace(), "tokenize_start")
         tok_prompts = await self.tokenize_prompts_async(dict_prompts, tok_params)
+        mark_trace(current_request_trace(), "tokenize_done")
 
         self._apply_prompt_extras(tok_prompts, prompt_extras)
 

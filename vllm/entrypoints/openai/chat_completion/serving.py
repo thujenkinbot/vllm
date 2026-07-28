@@ -46,6 +46,12 @@ from vllm.entrypoints.openai.engine.protocol import (
     ToolCall,
     UsageInfo,
 )
+from vllm.request_trace import (
+    RequestTrace,
+    mark_trace,
+    reset_current_request_trace,
+    set_current_request_trace,
+)
 from vllm.entrypoints.openai.engine.serving import (
     GenerationError,
     OpenAIServing,
@@ -247,19 +253,33 @@ class OpenAIServingChat(OpenAIServing):
                 tokenizer,
                 chat_template_kwargs=chat_template_kwargs,  # type: ignore[call-arg]
             )
-        result = await self.render_chat_request(request)
+        # Compute request_id early so the timing trace can cover the
+        # preprocessing and tokenization that happen inside render_chat_request.
+        request_id = (
+            f"chatcmpl-{self._base_request_id(raw_request, request.request_id)}"
+        )
+        request_metadata = RequestResponseMetadata(request_id=request_id)
+        if raw_request:
+            raw_request.state.request_metadata = request_metadata
+
+        # Per-request high-resolution timing trace. Bound to the current async
+        # context so deep call sites (e.g. the tokenizer) can also record stages
+        # without threading the trace through every signature. A no-op unless
+        # VLLM_TRACE_REQUEST is set; see vllm/request_trace.py.
+        trace = RequestTrace(request_id, scope="api")
+        request_metadata.trace = trace
+        trace.mark("api_enter")
+        _trace_token = set_current_request_trace(trace)
+        try:
+            result = await self.render_chat_request(request)
+        finally:
+            reset_current_request_trace(_trace_token)
+        trace.mark("preprocess_done")
+
         if isinstance(result, ErrorResponse):
             return result
 
         conversation, engine_inputs = result
-
-        request_id = (
-            f"chatcmpl-{self._base_request_id(raw_request, request.request_id)}"
-        )
-
-        request_metadata = RequestResponseMetadata(request_id=request_id)
-        if raw_request:
-            raw_request.state.request_metadata = request_metadata
 
         lora_request = self._maybe_get_adapters(request, supports_default_mm_loras=True)
 
@@ -338,6 +358,7 @@ class OpenAIServingChat(OpenAIServing):
                 else:
                     reasoning_ended = None
 
+                trace.mark("engine_submit")
                 generator = self.engine_client.generate(
                     engine_input,
                     sampling_params,
@@ -505,6 +526,7 @@ class OpenAIServingChat(OpenAIServing):
                 # the result_generator, it needs to be sent as the FIRST
                 # response (by the try...catch).
                 if first_iteration:
+                    mark_trace(request_metadata.trace, "first_token")
                     num_cached_tokens = res.num_cached_tokens
                     # Send first response for each request.n (index) with
                     # the role
@@ -933,6 +955,7 @@ class OpenAIServingChat(OpenAIServing):
             data = self.create_streaming_error_response(e)
             yield f"data: {data}\n\n"
         # Send the final done message after all response.n are finished
+        mark_trace(request_metadata.trace, "stream_done")
         yield "data: [DONE]\n\n"
 
     async def chat_completion_full_generator(
@@ -954,6 +977,8 @@ class OpenAIServingChat(OpenAIServing):
                 final_res = res
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
+
+        mark_trace(request_metadata.trace, "response_ready")
 
         if final_res is None:
             return self.create_error_response(

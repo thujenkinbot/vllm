@@ -31,6 +31,7 @@ from vllm.logger import init_logger
 from vllm.logging_utils.dump_input import dump_engine_exception
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.request_trace import RequestTrace
 from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.tracing import instrument, maybe_init_worker_tracer
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
@@ -369,6 +370,11 @@ class EngineCore:
                 "Disabling KVTransfer for this request."
             )
 
+        # Attach an engine-process timing trace (separate clock from the API
+        # frontend process; correlated by request_id only). A no-op unless
+        # VLLM_TRACE_REQUEST is set; see vllm/request_trace.py.
+        request.trace = RequestTrace(request.request_id, scope="engine")
+        request.trace.mark("engine_add")
         self.scheduler.add_request(request)
         if request.abort_immediately:
             # Immediately abort so the connector's request_finished hook runs

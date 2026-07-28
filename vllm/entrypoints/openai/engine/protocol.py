@@ -111,8 +111,14 @@ class UsageInfo(OpenAIBaseModel):
 
 
 class RequestResponseMetadata(BaseModel):
+    # Allow non-pydantic field types: `trace` holds a plain Python object.
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     request_id: str
     final_usage_info: UsageInfo | None = None
+    # Per-request high-resolution timing trace (a vllm.request_trace.RequestTrace
+    # or None). Populated only at the API layer; never serialized to the client.
+    trace: Any = Field(default=None, exclude=True)
 
 
 class JsonSchemaResponseFormat(OpenAIBaseModel):

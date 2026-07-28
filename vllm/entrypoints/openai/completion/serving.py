@@ -27,6 +27,12 @@ from vllm.entrypoints.openai.engine.protocol import (
     RequestResponseMetadata,
     UsageInfo,
 )
+from vllm.request_trace import (
+    RequestTrace,
+    mark_trace,
+    reset_current_request_trace,
+    set_current_request_trace,
+)
 from vllm.entrypoints.openai.engine.serving import (
     GenerationError,
     OpenAIServing,
@@ -135,18 +141,29 @@ class OpenAIServingCompletion(OpenAIServing):
                 "Streaming is not currently supported with beam search"
             )
 
-        result = await self.render_completion_request(request)
+        # Compute request_id early so the timing trace can cover the
+        # preprocessing and tokenization that happen inside
+        # render_completion_request.
+        request_id = f"cmpl-{self._base_request_id(raw_request, request.request_id)}"
+        created_time = int(time.time())
+        request_metadata = RequestResponseMetadata(request_id=request_id)
+        if raw_request:
+            raw_request.state.request_metadata = request_metadata
+
+        trace = RequestTrace(request_id, scope="api")
+        request_metadata.trace = trace
+        trace.mark("api_enter")
+        _trace_token = set_current_request_trace(trace)
+        try:
+            result = await self.render_completion_request(request)
+        finally:
+            reset_current_request_trace(_trace_token)
+        trace.mark("preprocess_done")
+
         if isinstance(result, ErrorResponse):
             return result
 
         engine_inputs = result
-
-        request_id = f"cmpl-{self._base_request_id(raw_request, request.request_id)}"
-        created_time = int(time.time())
-
-        request_metadata = RequestResponseMetadata(request_id=request_id)
-        if raw_request:
-            raw_request.state.request_metadata = request_metadata
 
         lora_request = self._maybe_get_adapters(request)
 
@@ -201,6 +218,7 @@ class OpenAIServingCompletion(OpenAIServing):
                     trace_headers=trace_headers,
                 )
             else:
+                trace.mark("engine_submit")
                 generator = self.engine_client.generate(
                     engine_input,
                     sampling_params,
@@ -263,6 +281,8 @@ class OpenAIServingCompletion(OpenAIServing):
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
 
+        mark_trace(request_metadata.trace, "response_ready")
+
         # When user requests streaming but we don't stream, we still need to
         # return a streaming response with a single event.
         if request.stream:
@@ -307,6 +327,7 @@ class OpenAIServingCompletion(OpenAIServing):
                 prompt_logprobs = res.prompt_logprobs
 
                 if first_iteration:
+                    mark_trace(request_metadata.trace, "first_token")
                     num_cached_tokens = res.num_cached_tokens
                     first_iteration = False
 
@@ -471,6 +492,7 @@ class OpenAIServingCompletion(OpenAIServing):
             logger.exception("Error in completion stream generator.")
             data = self.create_streaming_error_response(e)
             yield f"data: {data}\n\n"
+        mark_trace(request_metadata.trace, "stream_done")
         yield "data: [DONE]\n\n"
 
     def request_output_to_completion_response(
