@@ -2036,14 +2036,13 @@ def initialize_model_parallel(
         assert _PP is None, "pipeline model parallel group is already initialized"
         pp_groups = []
         if parallel_config.num_edges > 1:
-            # Multi-edge: N PP pairs sharing the cloud's first NPU
-            # (rank ``num_edges``); the cloud's other ranks are PP
-            # singletons (cloud-internal TP only).
-            num_edges = parallel_config.num_edges
-            cloud_first = num_edges
-            for i in range(num_edges):
-                pp_groups.append([i, cloud_first])
-            for r in range(cloud_first + 1, num_edges + cloud_npu_count):
+            # Multi-edge: vllm_ascend creates the N per-edge PP pairs
+            # (each [edge_i, cloud_first]) as independent
+            # GroupCoordinators in init_ascend_model_parallel. Here
+            # every rank is a PP singleton so the global _PP is a no-op
+            # for non-edge-cloud paths; edge-cloud communication selects
+            # the right pair via worker._pp_groups[edge_id].
+            for r in range(world_size_per_instance):
                 pp_groups.append([r])
         else:
             for dp_idx in range(data_parallel_size):
