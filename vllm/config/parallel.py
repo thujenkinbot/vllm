@@ -231,6 +231,16 @@ class ParallelConfig:
     that all share one ``nn.Module`` replica; the cloud side keeps
     the original per-DP-instance layout.
     """
+    num_edges: int = 1
+    """Number of independent edge nodes sharing one cloud replica.
+
+    When >1, ``num_edges`` single-NPU edges share a single cloud in
+    time-division: each edge forms its own PP pair with the cloud's
+    first NPU, and the cloud serves them round-robin (no batch
+    merging). ``edge_npu_count`` is forced to ``num_edges`` (one rank
+    per edge, edge TP=1). When ==1 (default) the original 1:1
+    edge-cloud layout is used unchanged.
+    """
 
     enable_dbo: bool = False
     """Enable dual batch overlap for the model executor."""
@@ -826,7 +836,25 @@ class ParallelConfig:
             * self.prefill_context_parallel_size
         )
 
-        if self.enable_edge_cloud:
+        if self.enable_edge_cloud and self.num_edges > 1:
+            # Multi-edge-cloud topology: ``num_edges`` single-NPU edges
+            # share one cloud replica in time-division. Each edge forms
+            # its own PP pair with the cloud's first NPU; the cloud
+            # serves them round-robin (no cross-edge batch merging).
+            if self.cloud_npu_count <= 0:
+                raise ValueError(
+                    "cloud_npu_count must be positive when num_edges > 1.")
+            if self.data_parallel_size != 1:
+                raise ValueError(
+                    "data_parallel_size must be 1 when num_edges > 1; "
+                    "each edge is a single DP rank sharing the cloud.")
+            self.edge_npu_count = self.num_edges
+            self.is_shared_model_edge = False
+            self.world_size = self.num_edges + self.cloud_npu_count
+            self.pipeline_parallel_size = 2
+            self.tensor_parallel_size = (
+                1 if self.is_edge_node else self.cloud_npu_count)
+        elif self.enable_edge_cloud:
             if self.edge_npu_count <= 0 or self.cloud_npu_count <= 0:
                 raise ValueError(
                     "edge_npu_count and cloud_npu_count must be positive "

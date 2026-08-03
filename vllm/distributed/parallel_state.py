@@ -2005,12 +2005,23 @@ def initialize_model_parallel(
         # All ranks must call new_group together, so all ranks include all subgroups
         assert _TP is None, "tensor model parallel group is already initialized"
         tp_groups = []
-        for dp_idx in range(data_parallel_size):
-            base = dp_idx * world_size_per_instance
-            tp_edge_ranks = [base + r for r in range(edge_npu_count)]
-            tp_cloud_ranks = [base + edge_npu_count + r for r in range(cloud_npu_count)]
-            tp_groups.append(tp_edge_ranks)
-            tp_groups.append(tp_cloud_ranks)
+        if parallel_config.num_edges > 1:
+            # Multi-edge: each edge is a single-NPU singleton TP group;
+            # the cloud forms one TP group of cloud_npu_count ranks.
+            num_edges = parallel_config.num_edges
+            for i in range(num_edges):
+                tp_groups.append([i])
+            tp_groups.append(
+                list(range(num_edges, num_edges + cloud_npu_count)))
+        else:
+            for dp_idx in range(data_parallel_size):
+                base = dp_idx * world_size_per_instance
+                tp_edge_ranks = [base + r for r in range(edge_npu_count)]
+                tp_cloud_ranks = [
+                    base + edge_npu_count + r
+                    for r in range(cloud_npu_count)]
+                tp_groups.append(tp_edge_ranks)
+                tp_groups.append(tp_cloud_ranks)
         _TP = init_model_parallel_group(
             tp_groups,
             get_world_group().local_rank,
@@ -2024,12 +2035,24 @@ def initialize_model_parallel(
         # All ranks must call new_group together, so all ranks include all subgroups
         assert _PP is None, "pipeline model parallel group is already initialized"
         pp_groups = []
-        for dp_idx in range(data_parallel_size):
-            base = dp_idx * world_size_per_instance
-            pp_groups.append([base + 0, base + edge_npu_count])  # NPU0 PP pair
-            for r in range(1, world_size_per_instance):
-                if r != edge_npu_count:
-                    pp_groups.append([base + r])
+        if parallel_config.num_edges > 1:
+            # Multi-edge: N PP pairs sharing the cloud's first NPU
+            # (rank ``num_edges``); the cloud's other ranks are PP
+            # singletons (cloud-internal TP only).
+            num_edges = parallel_config.num_edges
+            cloud_first = num_edges
+            for i in range(num_edges):
+                pp_groups.append([i, cloud_first])
+            for r in range(cloud_first + 1, num_edges + cloud_npu_count):
+                pp_groups.append([r])
+        else:
+            for dp_idx in range(data_parallel_size):
+                base = dp_idx * world_size_per_instance
+                pp_groups.append(
+                    [base + 0, base + edge_npu_count])  # NPU0 PP pair
+                for r in range(1, world_size_per_instance):
+                    if r != edge_npu_count:
+                        pp_groups.append([base + r])
         _PP = init_model_parallel_group(
             pp_groups,
             get_world_group().local_rank,
