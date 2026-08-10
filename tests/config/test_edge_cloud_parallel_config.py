@@ -21,6 +21,21 @@ def test_multi_edge_parallel_config_for_edge() -> None:
     assert config.tensor_parallel_size == 1
     assert config.pipeline_parallel_size == 2
     assert config.local_world_size == 1
+    assert config.edge_cloud_global_start_rank == 0
+
+
+def test_second_edge_uses_node_rank_as_global_start_rank() -> None:
+    config = ParallelConfig(
+        enable_edge_cloud=True,
+        cloud_npu_count=4,
+        num_edges=2,
+        is_edge_node=True,
+        nnodes=3,
+        node_rank=1,
+        distributed_executor_backend="mp",
+    )
+
+    assert config.edge_cloud_global_start_rank == 1
 
 
 def test_multi_edge_parallel_config_for_cloud() -> None:
@@ -38,6 +53,7 @@ def test_multi_edge_parallel_config_for_cloud() -> None:
     assert config.tensor_parallel_size == 8
     assert config.pipeline_parallel_size == 2
     assert config.local_world_size == 8
+    assert config.edge_cloud_global_start_rank == 2
 
 
 @pytest.mark.parametrize("data_parallel_size", [2, 4])

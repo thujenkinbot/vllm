@@ -673,6 +673,19 @@ class ParallelConfig:
             return self.edge_npu_count if self.is_edge_node else self.cloud_npu_count
         return self.world_size // self.nnodes_within_dp
 
+    @property
+    def edge_cloud_global_start_rank(self) -> int:
+        """First global worker rank owned by this edge-cloud node."""
+        if not self.enable_edge_cloud:
+            raise RuntimeError(
+                "edge_cloud_global_start_rank requires enable_edge_cloud=True."
+            )
+        if self.num_edges > 1 and self.is_edge_node:
+            # Every edge is a separate one-worker node. Its static node rank is
+            # also its global worker rank: edge 0 -> rank 0, edge 1 -> rank 1.
+            return self.node_rank
+        return 0 if self.is_edge_node else self.edge_npu_count
+
     @staticmethod
     def has_unfinished_dp(dp_group: ProcessGroup, has_unfinished: bool) -> bool:
         tensor = torch.tensor([has_unfinished], dtype=torch.int32, device="cpu")

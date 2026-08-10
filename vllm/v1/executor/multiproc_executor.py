@@ -162,11 +162,7 @@ class MultiprocExecutor(Executor):
         success = False
         try:
             if self.parallel_config.enable_edge_cloud:
-                global_start_rank = (
-                    0
-                    if self.parallel_config.is_edge_node
-                    else self.parallel_config.edge_npu_count
-                )
+                global_start_rank = self.parallel_config.edge_cloud_global_start_rank
             else:
                 global_start_rank = (
                     self.local_world_size * self.parallel_config.node_rank_within_dp
@@ -220,9 +216,7 @@ class MultiprocExecutor(Executor):
                 for rank in range(self.world_size):
                     local_idx = rank - global_start_rank
                     if 0 <= local_idx < self.local_world_size:
-                        local_message_queue = self.workers[
-                            local_idx
-                        ].worker_response_mq
+                        local_message_queue = self.workers[local_idx].worker_response_mq
                         assert local_message_queue is not None
                         self.response_mqs.append(local_message_queue)
                     else:
@@ -278,11 +272,7 @@ class MultiprocExecutor(Executor):
 
     def _is_driver_worker(self, rank: int) -> bool:
         if self.parallel_config.enable_edge_cloud:
-            return rank == (
-                0
-                if self.parallel_config.is_edge_node
-                else self.parallel_config.edge_npu_count
-            )
+            return rank == self.parallel_config.edge_cloud_global_start_rank
         return rank % self.parallel_config.tensor_parallel_size == 0
 
     def start_worker_monitor(self, inline=False) -> None:
@@ -570,10 +560,13 @@ class WorkerProc:
     def _init_message_queues(
         self, input_shm_handle: Handle, vllm_config: VllmConfig
     ) -> None:
-        if vllm_config.parallel_config.nnodes_within_dp == 1:
+        parallel_config = vllm_config.parallel_config
+        multi_edge = parallel_config.enable_edge_cloud and parallel_config.num_edges > 1
+        if parallel_config.nnodes_within_dp == 1 or multi_edge:
             # Initialize MessageQueue for receiving SchedulerOutput
             self.rpc_broadcast_mq = MessageQueue.create_from_handle(
-                input_shm_handle, self.worker.rank
+                input_shm_handle,
+                self.worker.local_rank if multi_edge else self.worker.rank,
             )
 
             # Initializes a message queue for sending the model output
