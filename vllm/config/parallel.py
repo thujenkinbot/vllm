@@ -197,6 +197,12 @@ class ParallelConfig:
     """Number of NPUs on the edge node when edge-cloud mode is enabled."""
     cloud_npu_count: int = 0
     """Number of NPUs on the cloud node when edge-cloud mode is enabled."""
+    num_edges: int = 1
+    """Number of independent single-NPU edges sharing one cloud replica.
+
+    Values greater than one enable the multi-edge MVP topology. Each edge is
+    one global rank and the cloud ranks form one tensor-parallel model replica.
+    """
     is_edge_node: bool = False
     """Whether this engine process belongs to the edge node."""
 
@@ -660,6 +666,10 @@ class ParallelConfig:
     @property
     def local_world_size(self) -> int:
         if self.enable_edge_cloud:
+            if self.num_edges > 1 and self.is_edge_node:
+                # edge_npu_count is global in multi-edge mode; every edge node
+                # still owns exactly one local worker.
+                return 1
             return self.edge_npu_count if self.is_edge_node else self.cloud_npu_count
         return self.world_size // self.nnodes_within_dp
 
@@ -733,13 +743,54 @@ class ParallelConfig:
 
     def __post_init__(self) -> None:
         # Continue with the rest of the initialization
+        if self.num_edges < 1:
+            raise ValueError("num_edges must be at least 1.")
+        if not self.enable_edge_cloud and self.num_edges != 1:
+            raise ValueError(
+                "num_edges can only be changed when enable_edge_cloud is True."
+            )
         self.world_size = (
             self.pipeline_parallel_size
             * self.tensor_parallel_size
             * self.prefill_context_parallel_size
         )
 
-        if self.enable_edge_cloud:
+        if self.enable_edge_cloud and self.num_edges > 1:
+            if self.cloud_npu_count <= 0:
+                raise ValueError(
+                    "cloud_npu_count must be positive when num_edges is greater than 1."
+                )
+            if self.data_parallel_size != 1:
+                raise ValueError(
+                    "data_parallel_size must be 1 in multi-edge-cloud mode."
+                )
+            if self.is_moe_model:
+                raise ValueError(
+                    "multi-edge-cloud MVP currently supports dense models only."
+                )
+            if self.pipeline_parallel_size != 1 or self.tensor_parallel_size != 1:
+                raise ValueError(
+                    "pipeline_parallel_size and tensor_parallel_size must be 1 "
+                    "when configuring multi-edge-cloud mode."
+                )
+            if self.nnodes != self.num_edges + 1:
+                raise ValueError(
+                    "multi-edge-cloud MVP requires one node per edge plus one "
+                    f"cloud node: expected nnodes={self.num_edges + 1}, got "
+                    f"{self.nnodes}."
+                )
+            if self.is_edge_node and not 0 <= self.node_rank < self.num_edges:
+                raise ValueError(f"edge node_rank must be in [0, {self.num_edges}).")
+            if not self.is_edge_node and self.node_rank != self.num_edges:
+                raise ValueError(
+                    f"cloud node_rank must be {self.num_edges} in the static "
+                    "multi-edge-cloud MVP topology."
+                )
+            self.edge_npu_count = self.num_edges
+            self.world_size = self.num_edges + self.cloud_npu_count
+            self.pipeline_parallel_size = 2
+            self.tensor_parallel_size = 1 if self.is_edge_node else self.cloud_npu_count
+        elif self.enable_edge_cloud:
             if self.edge_npu_count <= 0 or self.cloud_npu_count <= 0:
                 raise ValueError(
                     "edge_npu_count and cloud_npu_count must be positive "

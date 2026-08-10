@@ -1557,31 +1557,47 @@ def initialize_model_parallel(
         is_edge = rank < edge_npu_count
         _IS_EDGE_DEVICE = is_edge
 
+        num_edges = parallel_config.num_edges
         tp_edge_ranks = list(range(edge_npu_count))
         tp_cloud_ranks = list(range(edge_npu_count, world_size))
         assert _TP is None, "tensor model parallel group is already initialized"
+        tp_groups = (
+            [[rank] for rank in tp_edge_ranks] + [tp_cloud_ranks]
+            if num_edges > 1
+            else [tp_edge_ranks, tp_cloud_ranks]
+        )
         _TP = init_model_parallel_group(
-            [tp_edge_ranks, tp_cloud_ranks],
+            tp_groups,
             get_world_group().local_rank,
             backend,
             use_message_queue_broadcaster=True,
             group_name="tp",
         )
 
-        pp_group_ranks = [0, edge_npu_count]
-        pp_other_ranks = [
-            [r] for r in range(world_size) if r not in (0, edge_npu_count)
-        ]
         assert _PP is None, "pipeline model parallel group is already initialized"
+        if num_edges > 1:
+            # vLLM-Ascend creates one overlapping [edge, cloud-leader]
+            # coordinator per edge. A single GroupCoordinator cannot model the
+            # cloud leader belonging to all of those pairs.
+            pp_groups = [[rank] for rank in range(world_size)]
+            pp_group_ranks: list[int] = []
+        else:
+            pp_group_ranks = [0, edge_npu_count]
+            pp_other_ranks = [
+                [r] for r in range(world_size) if r not in (0, edge_npu_count)
+            ]
+            pp_groups = [pp_group_ranks] + pp_other_ranks
         _PP = init_model_parallel_group(
-            [pp_group_ranks] + pp_other_ranks,
+            pp_groups,
             get_world_group().local_rank,
             backend,
             group_name="pp",
         )
 
         all_ranks = list(range(world_size))
-        assert _DCP is None, "decode context model parallel group is already initialized"
+        assert _DCP is None, (
+            "decode context model parallel group is already initialized"
+        )
         _DCP = init_model_parallel_group(
             [[r] for r in all_ranks],
             get_world_group().local_rank,
@@ -1605,7 +1621,7 @@ def initialize_model_parallel(
         )
         assert _EP is None, "expert parallel group is already initialized"
         _EP = init_model_parallel_group(
-            [tp_edge_ranks, tp_cloud_ranks],
+            tp_groups,
             get_world_group().local_rank,
             backend,
             group_name="ep",

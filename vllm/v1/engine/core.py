@@ -277,8 +277,26 @@ class EngineCore:
             scheduler_kv_cache_config = generate_scheduler_kv_cache_config(
                 [kv_cache_configs[max_group_idx]]
             )
+            num_edges = vllm_config.parallel_config.num_edges
+            if num_edges > 1:
+                cloud_num_blocks = scheduler_kv_cache_config.num_blocks
+                scheduler_kv_cache_config.num_blocks //= num_edges
+                if scheduler_kv_cache_config.num_blocks <= 0:
+                    raise ValueError(
+                        f"Cloud KV cache has {cloud_num_blocks} blocks, which "
+                        f"cannot be partitioned across {num_edges} edges."
+                    )
+                logger.info(
+                    "Multi-edge-cloud KV partition: %d total cloud blocks, "
+                    "%d blocks per edge, %d unused blocks.",
+                    cloud_num_blocks,
+                    scheduler_kv_cache_config.num_blocks,
+                    cloud_num_blocks % num_edges,
+                )
         else:
-            scheduler_kv_cache_config = generate_scheduler_kv_cache_config(kv_cache_configs)
+            scheduler_kv_cache_config = generate_scheduler_kv_cache_config(
+                kv_cache_configs
+            )
         vllm_config.cache_config.num_gpu_blocks = scheduler_kv_cache_config.num_blocks
         kv_cache_groups = scheduler_kv_cache_config.kv_cache_groups
         if kv_cache_groups:

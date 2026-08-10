@@ -238,6 +238,10 @@ class SchedulerOutput:
     # preventing stale NaN/data from corrupting attention or SSM computation.
     new_block_ids_to_zero: list[int] | None = None
 
+    # Edge that owns this scheduling step. The default preserves the existing
+    # one-edge behavior; vLLM-Ascend stamps it in multi-edge-cloud mode.
+    edge_id: int = 0
+
     @classmethod
     def make_empty(cls) -> "SchedulerOutput":
         return cls(
