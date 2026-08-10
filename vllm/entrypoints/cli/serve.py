@@ -144,6 +144,13 @@ def cmd_init() -> list[CLISubcommand]:
     return [ServeSubcommand()]
 
 
+def _get_headless_executor_class(vllm_config):
+    parallel_config = vllm_config.parallel_config
+    if parallel_config.enable_edge_cloud and parallel_config.num_edges > 1:
+        return Executor.get_class(vllm_config)
+    return MultiprocExecutor
+
+
 def run_headless(args: argparse.Namespace):
     if args.api_server_count > 1:
         raise ValueError("api_server_count can't be set in headless mode")
@@ -190,7 +197,8 @@ def run_headless(args: argparse.Namespace):
             head_node_address,
         )
 
-        executor = MultiprocExecutor(vllm_config, monitor_workers=False)
+        executor_class = _get_headless_executor_class(vllm_config)
+        executor = executor_class(vllm_config, monitor_workers=False)
         executor.start_worker_monitor(inline=True)
         return
 
